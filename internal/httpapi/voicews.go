@@ -123,6 +123,7 @@ func processTurn(parentCtx context.Context, s *Server, history []llm.Message, pc
 	ctx, cancel := context.WithTimeout(parentCtx, 60*time.Second)
 	defer cancel()
 
+	log.Printf("WS turn: pcm=%d bytes (~%.1f sec)", len(pcm), float64(len(pcm))/(16000.0*2))
 	if len(pcm) < 1000 {
 		return sendJSON(wsOutbound{Type: "error", Message: "audio too short"})
 	}
@@ -130,10 +131,12 @@ func processTurn(parentCtx context.Context, s *Server, history []llm.Message, pc
 	// 1) STT
 	text, err := s.stt.RecognizeLPCM(ctx, pcm)
 	if err != nil {
+		log.Printf("WS STT err: %v", err)
 		return sendJSON(wsOutbound{Type: "error", Message: "stt: " + err.Error()})
 	}
 	if strings.TrimSpace(text) == "" {
-		return sendJSON(wsOutbound{Type: "error", Message: "не распознано"})
+		log.Printf("WS STT: empty (тишина/шум)")
+		return sendJSON(wsOutbound{Type: "error", Message: "не распознано (тишина или шум)"})
 	}
 	log.Printf("WS STT: %q", text)
 	if err := sendJSON(wsOutbound{Type: "recognized", Text: text}); err != nil {

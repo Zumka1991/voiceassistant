@@ -245,7 +245,13 @@ function onWsMessage(ev) {
         setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
         break;
       case 'error':
-        addMsg('err', msg.message || 'ошибка');
+        if (userPlaceholderMsg) {
+          userPlaceholderMsg.className = 'msg err';
+          userPlaceholderMsg.textContent = '⚠️ ' + (msg.message || 'ошибка');
+          userPlaceholderMsg = null;
+        } else {
+          addMsg('err', msg.message || 'ошибка');
+        }
         utteranceActive = false;
         setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
         break;

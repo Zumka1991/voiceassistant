@@ -65,10 +65,10 @@ const MAX_RECORD_SEC = 20;
 const CALIB_MS = 700;             // длительность калибровки фона
 const VAD_FACTOR = 3.5;           // порог = noise * factor
 const VAD_MIN_THRESHOLD = 0.008;  // нижняя граница порога
-const VAD_SPEECH_START_FRAMES = 3;// сколько подряд "речевых" кадров нужно для старта
-const VAD_SILENCE_MS = 900;       // тишины — конец фразы
-const VAD_MIN_SPEECH_MS = 400;    // меньше — игнор
-const PREROLL_MS = 300;           // буфер до триггера VAD (чтобы не терять начало слова)
+const VAD_SPEECH_START_FRAMES = 1;// сколько подряд "речевых" кадров нужно для старта
+const VAD_SILENCE_MS = 800;       // тишины — конец фразы
+const VAD_MIN_SPEECH_MS = 150;    // меньше — игнор (одно слово "привет" ≈ 400мс)
+const PREROLL_MS = 400;           // буфер до триггера VAD (чтобы не терять начало слова)
 const BARGE_IN_FRAMES = 5;        // подряд кадров для прерывания бота
 
 function addMsg(role, text) {

@@ -239,13 +239,18 @@ function onFrame(e) {
     if (isVoice) {
       speechStartFrames++;
       if (speechStartFrames >= VAD_SPEECH_START_FRAMES) {
+        if (!wsStartTurn()) {
+          // WS ещё не открыт — попробуем переподключиться и сбросим попытку
+          speechStartFrames = 0;
+          if (!ws || ws.readyState === WebSocket.CLOSED) wsOpen().catch(() => {});
+          return;
+        }
         speaking = true;
         speakStartTs = now;
         utterancePcm = preRollBuf.slice(); // включаем pre-roll
         preRollBuf = [];
         speechStartFrames = 0;
         setStatus('🟢 слушаю...');
-        wsStartTurn();
         userPlaceholderMsg = addMsg('user', '🎤 …');
         // отправляем pre-roll сразу
         for (const c of utterancePcm) wsSendPcm(c);
@@ -304,12 +309,14 @@ function onWsMessage(ev) {
         if (botReplyMsg) botReplyMsg.textContent += (botReplyMsg.textContent ? ' ' : '') + m.text;
         break;
       case 'done':
+        clearProcessingTimer();
         if (botReplyMsg) history.push({ role: 'assistant', content: botReplyMsg.textContent });
         botReplyMsg = null;
         utteranceActive = false;
         setStatus(mode === 'call' ? '📞 говорите' : 'Готов');
         break;
       case 'error':
+        clearProcessingTimer();
         if (userPlaceholderMsg) {
           userPlaceholderMsg.className = 'msg err';
           userPlaceholderMsg.textContent = '⚠️ ' + (m.message || 'ошибка');
@@ -326,25 +333,40 @@ function onWsMessage(ev) {
     enqueueAudio(blob);
   }
 }
+let processingTimer = null;
+function wsReady() { return ws && ws.readyState === WebSocket.OPEN; }
 function wsStartTurn() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!wsReady()) return false;
   utteranceActive = true;
   ws.send(JSON.stringify({ type: 'start', history }));
+  return true;
 }
 function wsSendPcm(int16) {
-  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!utteranceActive || !wsReady()) return;
   ws.send(int16.buffer);
 }
 function wsEndTurn() {
-  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!utteranceActive || !wsReady()) return false;
   ws.send(JSON.stringify({ type: 'end' }));
   utteranceActive = false;
+  // watchdog: если сервер за 15 сек ничего не вернёт — покажем таймаут
+  clearTimeout(processingTimer);
+  processingTimer = setTimeout(() => {
+    if (userPlaceholderMsg) {
+      userPlaceholderMsg.className = 'msg err';
+      userPlaceholderMsg.textContent = '⌛ нет ответа от сервера';
+      userPlaceholderMsg = null;
+    }
+    setStatus(mode === 'call' ? '📞 говорите' : 'Готов');
+  }, 15000);
+  return true;
 }
+function clearProcessingTimer() { clearTimeout(processingTimer); processingTimer = null; }
 function wsAbortTurn() {
-  if (ws) { try { ws.close(); } catch {} ws = null; }
+  // НЕ закрываем WS — просто откатываем локальное состояние, чтобы не сломать
+  // следующую попытку. Серверу всё равно: если он не получит "end", он сам
+  // закроет соединение по таймауту (нам это не мешает).
   utteranceActive = false;
-  // переоткроем для следующей фразы
-  if (mode === 'call') wsOpen().catch(() => {});
 }
 
 // ---------------- Очередь воспроизведения ----------------

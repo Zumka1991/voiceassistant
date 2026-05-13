@@ -123,22 +123,24 @@ func processTurn(parentCtx context.Context, s *Server, history []llm.Message, pc
 	ctx, cancel := context.WithTimeout(parentCtx, 60*time.Second)
 	defer cancel()
 
+	turnStart := time.Now()
 	log.Printf("WS turn: pcm=%d bytes (~%.1f sec)", len(pcm), float64(len(pcm))/(16000.0*2))
 	if len(pcm) < 1000 {
 		return sendJSON(wsOutbound{Type: "error", Message: "audio too short"})
 	}
 
 	// 1) STT
+	sttStart := time.Now()
 	text, err := s.stt.RecognizeLPCM(ctx, pcm)
 	if err != nil {
 		log.Printf("WS STT err: %v", err)
 		return sendJSON(wsOutbound{Type: "error", Message: "stt: " + err.Error()})
 	}
 	if strings.TrimSpace(text) == "" {
-		log.Printf("WS STT: empty (тишина/шум)")
+		log.Printf("WS STT: empty (тишина/шум) %v", time.Since(sttStart))
 		return sendJSON(wsOutbound{Type: "error", Message: "не распознано (тишина или шум)"})
 	}
-	log.Printf("WS STT: %q", text)
+	log.Printf("WS STT (%v): %q", time.Since(sttStart).Round(time.Millisecond), text)
 	if err := sendJSON(wsOutbound{Type: "recognized", Text: text}); err != nil {
 		return err
 	}
@@ -154,21 +156,28 @@ func processTurn(parentCtx context.Context, s *Server, history []llm.Message, pc
 		wg  sync.WaitGroup
 	)
 
+	firstChunkAt := time.Time{}
 	flushSentence := func(sentence string) {
 		sentence = strings.TrimSpace(sentence)
 		if sentence == "" {
 			return
 		}
+		if firstChunkAt.IsZero() {
+			firstChunkAt = time.Now()
+			log.Printf("WS first sentence ready at +%v: %q", time.Since(turnStart).Round(time.Millisecond), sentence)
+		}
 		_ = sendJSON(wsOutbound{Type: "reply_chunk", Text: sentence})
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			ttsStart := time.Now()
 			audio, _, err := s.tts.Synthesize(ctx, sentence)
 			if err != nil {
 				log.Printf("tts chunk: %v", err)
 				_ = sendJSON(wsOutbound{Type: "error", Message: "tts: " + err.Error()})
 				return
 			}
+			log.Printf("WS TTS (%v, %d bytes): %q", time.Since(ttsStart).Round(time.Millisecond), len(audio), sentence)
 			_ = sendBinary(audio)
 		}()
 	}
@@ -199,6 +208,7 @@ func processTurn(parentCtx context.Context, s *Server, history []llm.Message, pc
 	_ = full
 
 	wg.Wait()
+	log.Printf("WS turn done in %v", time.Since(turnStart).Round(time.Millisecond))
 	return sendJSON(wsOutbound{Type: "done"})
 }
 

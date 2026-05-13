@@ -2,55 +2,58 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>VoiceAssistant — тест</title>
+<title>VoiceAssistant</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
-  h1 { font-size: 20px; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
   .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
   #chat { border: 1px solid #ccc3; border-radius: 8px; padding: 12px; height: 50vh; overflow-y: auto; background: #0001; }
-  .msg { margin: 8px 0; padding: 8px 12px; border-radius: 12px; max-width: 80%; white-space: pre-wrap; word-wrap: break-word; }
+  .msg { margin: 8px 0; padding: 10px 14px; border-radius: 14px; max-width: 85%; white-space: pre-wrap; word-wrap: break-word; line-height: 1.35; }
   .user { background: #2563eb; color: white; margin-left: auto; }
   .bot  { background: #6b72801f; }
   .err  { background: #dc2626; color: white; }
-  form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  input[type=text] { flex: 1; min-width: 200px; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; font: inherit; }
-  button { padding: 10px 14px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; font: inherit; }
-  button:disabled { opacity: 0.5; cursor: wait; }
-  #mic  { background: #16a34a; }
-  #mic.recording { background: #dc2626; animation: pulse 1s infinite; }
-  #call { background: #0891b2; }
-  #call.active { background: #dc2626; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 50% { opacity: 0.65; } }
-  .status { font-size: 13px; color: #888; margin-top: 10px; min-height: 18px; }
-  .level { display: inline-block; height: 6px; background: #16a34a; border-radius: 3px; margin-left: 8px; vertical-align: middle; transition: width 60ms linear; }
+  .hint { color: #888; font-size: 12px; text-align: center; margin: 12px 0 4px; }
+  #ptt { display: block; width: 100%; padding: 22px; margin: 12px 0 8px; font-size: 18px; font-weight: 600; border: 0; border-radius: 14px; background: #16a34a; color: white; cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none; }
+  #ptt:disabled { opacity: 0.55; cursor: wait; }
+  #ptt.recording { background: #dc2626; }
+  #ptt.processing { background: #6b7280; }
+  form { display: flex; gap: 8px; margin-top: 4px; }
+  input[type=text] { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; font: inherit; }
+  button.txt { padding: 10px 14px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; font: inherit; }
+  button.txt:disabled { opacity: 0.5; cursor: wait; }
+  .status { font-size: 13px; color: #888; margin-top: 8px; min-height: 18px; }
+  .level-wrap { display: inline-block; width: 120px; height: 6px; background: #6b72801f; border-radius: 3px; vertical-align: middle; margin-left: 8px; overflow: hidden; }
+  .level { display: block; height: 100%; background: #16a34a; width: 0%; transition: width 60ms linear; }
 </style>
 </head>
 <body>
   <h1>🎙️ VoiceAssistant</h1>
-  <div class="sub">«📞 Позвонить» — стриминговый режим (минимальная задержка). «🎤 Говорить» — однократно.</div>
+  <div class="sub">Удерживай кнопку и говори. Отпустишь — ассистент ответит голосом.</div>
 
   <div id="chat"></div>
 
+  <button id="ptt" type="button">🎤 Удерживай чтобы говорить</button>
+
   <form id="form">
-    <button id="call" type="button">📞 Позвонить</button>
-    <button id="mic" type="button">🎤 Говорить</button>
-    <input id="input" type="text" placeholder="...или напиши" autocomplete="off">
-    <button id="send" type="submit">Отправить</button>
+    <input id="input" type="text" placeholder="...или напиши текстом" autocomplete="off">
+    <button class="txt" id="send" type="submit">Отправить</button>
   </form>
-  <div class="status"><span id="status"></span><span id="level" class="level" style="width:0px"></span></div>
+  <div class="status"><span id="status">Готов</span><span class="level-wrap"><span id="level" class="level"></span></span></div>
 
 <script>
 const chat = document.getElementById('chat');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
-const micBtn = document.getElementById('mic');
-const callBtn = document.getElementById('call');
+const pttBtn = document.getElementById('ptt');
 const statusEl = document.getElementById('status');
 const levelEl = document.getElementById('level');
 const history = [];
+
+const TARGET_SR = 16000;
+const MAX_RECORD_SEC = 20;
 
 function addMsg(role, text) {
   const div = document.createElement('div');
@@ -62,7 +65,7 @@ function addMsg(role, text) {
 }
 function setStatus(t) { statusEl.textContent = t || ''; }
 
-// ---------------------- Текстовый чат ----------------------
+// ---------------- Текстовый чат ----------------
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
@@ -92,246 +95,118 @@ form.addEventListener('submit', async (e) => {
   }
 });
 
-// ---------------------- Аудио ----------------------
-const TARGET_SR = 16000;
-const VAD_THRESHOLD = 0.015;
-const VAD_SILENCE_MS = 700;
-const VAD_MIN_SPEECH_MS = 300;
-const BARGE_IN_FRAMES = 4;
-
+// ---------------- Аудио-захват ----------------
 let audioCtx = null, micStream = null, recorderNode = null, sourceNode = null;
 let resampleRatio = 1;
-
-let mode = 'idle';   // 'idle' | 'push' | 'call'
 let pcmChunks = [];
-let speaking = false;
-let lastSpeechTs = 0;
-let speakStartTs = 0;
-let lastVoiceFrames = 0;
+let recording = false;
+let recordStartTs = 0;
+let autoStopTimer = null;
 
-let ws = null;
-let utteranceActive = false;     // в WS turn открыт (start послан, end ещё нет)
-
-// очередь воспроизведения для call-режима
-const audioQueue = [];
-let playingNow = null;
-let botPlaying = false;
-let botReplyMsg = null;          // div сообщения бота для накопления текста
-let userPlaceholderMsg = null;
-
-async function ensureMicAudio() {
-  if (audioCtx) return;
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-  });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  sourceNode = audioCtx.createMediaStreamSource(micStream);
-  recorderNode = audioCtx.createScriptProcessor(2048, 1, 1);
-  resampleRatio = audioCtx.sampleRate / TARGET_SR;
-  recorderNode.onaudioprocess = onFrame;
-  sourceNode.connect(recorderNode);
-  recorderNode.connect(audioCtx.destination);
-}
-async function tearDownMicAudio() {
-  try { recorderNode && recorderNode.disconnect(); } catch {}
-  try { sourceNode && sourceNode.disconnect(); } catch {}
-  try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch {}
-  try { audioCtx && await audioCtx.close(); } catch {}
-  audioCtx = micStream = recorderNode = sourceNode = null;
-}
-
-function onFrame(e) {
-  const inputBuf = e.inputBuffer.getChannelData(0);
-  let sum = 0;
-  for (let i = 0; i < inputBuf.length; i++) sum += inputBuf[i] * inputBuf[i];
-  const rms = Math.sqrt(sum / inputBuf.length);
-  levelEl.style.width = Math.min(120, rms * 600) + 'px';
-
-  const isVoice = rms > VAD_THRESHOLD;
-  const now = performance.now();
-
-  // Barge-in во время речи бота
-  if (botPlaying && mode === 'call') {
-    if (isVoice) lastVoiceFrames++; else lastVoiceFrames = 0;
-    if (lastVoiceFrames >= BARGE_IN_FRAMES) {
-      stopBotPlayback();
-    }
+async function startRecording() {
+  if (recording) return;
+  setStatus('запрашиваю микрофон...');
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e) {
+    setStatus('Нет доступа к микрофону');
+    addMsg('err', 'Микрофон: ' + e.message);
     return;
   }
-  if (mode === 'idle') return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  sourceNode = audioCtx.createMediaStreamSource(micStream);
+  recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  resampleRatio = audioCtx.sampleRate / TARGET_SR;
+  pcmChunks = [];
 
-  // ресэмплинг к 16k Int16
-  const ratio = resampleRatio;
-  const outLen = Math.floor(inputBuf.length / ratio);
-  const out = new Int16Array(outLen);
-  for (let i = 0; i < outLen; i++) {
-    const s = Math.max(-1, Math.min(1, inputBuf[Math.floor(i * ratio)]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
+  recorderNode.onaudioprocess = (e) => {
+    const inputBuf = e.inputBuffer.getChannelData(0);
 
-  if (mode === 'push') { pcmChunks.push(out); return; }
+    // level indicator
+    let sum = 0;
+    for (let i = 0; i < inputBuf.length; i++) sum += inputBuf[i] * inputBuf[i];
+    const rms = Math.sqrt(sum / inputBuf.length);
+    levelEl.style.width = Math.min(100, rms * 600) + '%';
 
-  // CALL: VAD + стриминг через WS
-  if (isVoice) {
-    if (!speaking) {
-      speaking = true;
-      speakStartTs = now;
-      pcmChunks = [];
-      setStatus('🟢 слушаю...');
-      wsStartTurn();
-      userPlaceholderMsg = addMsg('user', '🎤 ...');
+    // Корректная децимация с усреднением (антиалиасинг box-фильтром).
+    const ratio = resampleRatio;
+    const outLen = Math.floor(inputBuf.length / ratio);
+    const out = new Int16Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const start = Math.floor(i * ratio);
+      const end = Math.min(inputBuf.length, Math.floor((i + 1) * ratio));
+      let s = 0, n = 0;
+      for (let j = start; j < end; j++) { s += inputBuf[j]; n++; }
+      const v = n > 0 ? s / n : 0;
+      const cl = Math.max(-1, Math.min(1, v));
+      out[i] = cl < 0 ? cl * 0x8000 : cl * 0x7fff;
     }
-    lastSpeechTs = now;
-    wsSendPcm(out);
-  } else if (speaking) {
-    wsSendPcm(out);
-    if (now - lastSpeechTs > VAD_SILENCE_MS) {
-      const dur = lastSpeechTs - speakStartTs;
-      speaking = false;
-      if (dur >= VAD_MIN_SPEECH_MS) {
-        wsEndTurn();
-        setStatus('⏳ обработка...');
-      } else {
-        wsAbortTurn();
-        if (userPlaceholderMsg) userPlaceholderMsg.remove();
-        userPlaceholderMsg = null;
-      }
+    pcmChunks.push(out);
+  };
+
+  sourceNode.connect(recorderNode);
+  recorderNode.connect(audioCtx.destination);
+
+  recording = true;
+  recordStartTs = performance.now();
+  pttBtn.classList.add('recording');
+  pttBtn.textContent = '⏹ Отпусти чтобы отправить';
+  setStatus('🎤 запись...');
+
+  autoStopTimer = setTimeout(() => {
+    if (recording) {
+      setStatus('запись остановлена (макс ' + MAX_RECORD_SEC + 'с)');
+      stopRecording();
     }
-  }
+  }, MAX_RECORD_SEC * 1000);
 }
 
-function flushPCM() {
+async function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  clearTimeout(autoStopTimer);
+  pttBtn.classList.remove('recording');
+  pttBtn.classList.add('processing');
+  pttBtn.textContent = '⏳ обработка...';
+  pttBtn.disabled = true;
+  levelEl.style.width = '0%';
+
+  const dur = (performance.now() - recordStartTs) / 1000;
+
+  try { recorderNode.disconnect(); } catch {}
+  try { sourceNode.disconnect(); } catch {}
+  try { micStream.getTracks().forEach(t => t.stop()); } catch {}
+  try { await audioCtx.close(); } catch {}
+  audioCtx = micStream = recorderNode = sourceNode = null;
+
+  if (dur < 0.4) {
+    resetPTT();
+    setStatus('Слишком коротко — удерживай дольше');
+    return;
+  }
+
   let total = 0;
   for (const c of pcmChunks) total += c.length;
   const pcm = new Int16Array(total);
   let off = 0;
   for (const c of pcmChunks) { pcm.set(c, off); off += c.length; }
   pcmChunks = [];
-  return pcm;
+
+  await sendVoice(pcm, dur);
+  resetPTT();
 }
 
-// ---------------------- WebSocket для режима звонка ----------------------
-function wsURL() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return proto + '//' + location.host + '/ws/voice';
-}
-function wsOpen() {
-  return new Promise((resolve, reject) => {
-    ws = new WebSocket(wsURL());
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = () => resolve();
-    ws.onerror = (e) => reject(new Error('ws error'));
-    ws.onclose = () => { ws = null; utteranceActive = false; };
-    ws.onmessage = onWsMessage;
-  });
+function resetPTT() {
+  pttBtn.classList.remove('processing', 'recording');
+  pttBtn.textContent = '🎤 Удерживай чтобы говорить';
+  pttBtn.disabled = false;
 }
 
-function onWsMessage(ev) {
-  if (typeof ev.data === 'string') {
-    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-    switch (msg.type) {
-      case 'recognized':
-        if (userPlaceholderMsg) userPlaceholderMsg.textContent = '🎤 ' + msg.text;
-        history.push({ role: 'user', content: msg.text });
-        botReplyMsg = addMsg('bot', '');
-        break;
-      case 'reply_chunk':
-        if (botReplyMsg) botReplyMsg.textContent += (botReplyMsg.textContent ? ' ' : '') + msg.text;
-        break;
-      case 'done':
-        if (botReplyMsg) history.push({ role: 'assistant', content: botReplyMsg.textContent });
-        botReplyMsg = null;
-        utteranceActive = false;
-        setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
-        break;
-      case 'error':
-        if (userPlaceholderMsg) {
-          userPlaceholderMsg.className = 'msg err';
-          userPlaceholderMsg.textContent = '⚠️ ' + (msg.message || 'ошибка');
-          userPlaceholderMsg = null;
-        } else {
-          addMsg('err', msg.message || 'ошибка');
-        }
-        utteranceActive = false;
-        setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
-        break;
-    }
-  } else {
-    // бинарь — OggOpus аудио предложения
-    const blob = new Blob([ev.data], { type: 'audio/ogg' });
-    enqueueAudio(blob);
-  }
-}
-
-function wsStartTurn() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  utteranceActive = true;
-  ws.send(JSON.stringify({ type: 'start', history }));
-}
-function wsSendPcm(int16) {
-  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(int16.buffer);
-}
-function wsEndTurn() {
-  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'end' }));
-  utteranceActive = false;
-}
-function wsAbortTurn() {
-  // нет специального сообщения — просто закрываем и переподключаемся
-  if (ws) { try { ws.close(); } catch {} ws = null; }
-  utteranceActive = false;
-}
-
-// ---------------------- Очередь воспроизведения ----------------------
-function enqueueAudio(blob) {
-  audioQueue.push(blob);
-  if (!playingNow) playNext();
-}
-function playNext() {
-  if (audioQueue.length === 0) {
-    playingNow = null;
-    botPlaying = false;
-    return;
-  }
-  const blob = audioQueue.shift();
-  const url = URL.createObjectURL(blob);
-  playingNow = new Audio(url);
-  botPlaying = true;
-  setStatus('🔊 говорит ассистент');
-  playingNow.onended = () => { URL.revokeObjectURL(url); playNext(); };
-  playingNow.onerror = () => { URL.revokeObjectURL(url); playNext(); };
-  playingNow.play().catch(() => playNext());
-}
-function stopBotPlayback() {
-  audioQueue.length = 0;
-  if (playingNow) { try { playingNow.pause(); } catch {} playingNow = null; }
-  botPlaying = false;
-}
-
-// ---------------------- Push-to-talk (HTTP, без стриминга) ----------------------
-async function startPush() {
-  if (mode !== 'idle') return;
-  await ensureMicAudio();
-  pcmChunks = [];
-  mode = 'push';
-  micBtn.classList.add('recording');
-  micBtn.textContent = '⏹ отпусти';
-  setStatus('🎤 запись...');
-}
-async function stopPush() {
-  if (mode !== 'push') return;
-  mode = 'idle';
-  micBtn.classList.remove('recording');
-  micBtn.textContent = '🎤 Говорить';
-  const buf = flushPCM();
-  await tearDownMicAudio();
-  if (buf.length < TARGET_SR * 0.3) { setStatus('слишком коротко'); return; }
-  await sendVoiceHTTP(buf);
-}
-async function sendVoiceHTTP(pcm) {
-  setStatus('⏳ обработка...');
-  const placeholder = addMsg('user', '🎤 ...');
+async function sendVoice(pcm, dur) {
+  setStatus(`⏳ обработка (${dur.toFixed(1)}с аудио)...`);
+  const placeholder = addMsg('user', '🎤 …');
   try {
     const res = await fetch('/api/voice', {
       method: 'POST',
@@ -348,47 +223,56 @@ async function sendVoiceHTTP(pcm) {
     const recognized = decodeURIComponent(res.headers.get('X-Recognized-Text') || '');
     const reply = decodeURIComponent(res.headers.get('X-Reply-Text') || '');
     const blob = await res.blob();
-    placeholder.textContent = '🎤 ' + recognized;
-    history.push({ role: 'user', content: recognized });
-    addMsg('bot', reply);
-    history.push({ role: 'assistant', content: reply });
-    enqueueAudio(blob);
+    placeholder.textContent = '🎤 ' + (recognized || '(пусто)');
+    if (recognized) history.push({ role: 'user', content: recognized });
+    if (reply) {
+      addMsg('bot', reply);
+      history.push({ role: 'assistant', content: reply });
+    }
+    playAudio(blob);
+    setStatus('Готов');
   } catch (e) {
     placeholder.className = 'msg err';
-    placeholder.textContent = 'Голос: ' + e.message;
-    setStatus('');
+    placeholder.textContent = 'Ошибка: ' + e.message;
+    setStatus('Готов');
   }
 }
-micBtn.addEventListener('pointerdown', e => { e.preventDefault(); startPush(); });
-micBtn.addEventListener('pointerup',   e => { e.preventDefault(); stopPush(); });
-micBtn.addEventListener('pointerleave',e => { if (mode === 'push') stopPush(); });
 
-// ---------------------- Call mode (WS стриминг) ----------------------
-async function startCall() {
-  await ensureMicAudio();
-  await wsOpen();
-  mode = 'call';
-  pcmChunks = [];
-  speaking = false;
-  callBtn.classList.add('active');
-  callBtn.textContent = '📵 Положить трубку';
-  micBtn.disabled = true;
-  setStatus('📞 в линии (говорите)');
+// Очередь воспроизведения — каждое аудио играется по очереди
+const audioQueue = [];
+let playingAudio = null;
+function playAudio(blob) {
+  audioQueue.push(blob);
+  if (!playingAudio) playNext();
 }
-async function stopCall() {
-  mode = 'idle';
-  stopBotPlayback();
-  if (ws) { try { ws.close(); } catch {} ws = null; }
-  utteranceActive = false;
-  await tearDownMicAudio();
-  callBtn.classList.remove('active');
-  callBtn.textContent = '📞 Позвонить';
-  micBtn.disabled = false;
-  setStatus('');
-  levelEl.style.width = '0px';
+function playNext() {
+  if (audioQueue.length === 0) { playingAudio = null; return; }
+  const blob = audioQueue.shift();
+  const url = URL.createObjectURL(blob);
+  playingAudio = new Audio(url);
+  playingAudio.onended = () => { URL.revokeObjectURL(url); playNext(); };
+  playingAudio.onerror = () => { URL.revokeObjectURL(url); playNext(); };
+  playingAudio.play().catch(() => playNext());
 }
-callBtn.addEventListener('click', () => {
-  if (mode === 'call') stopCall(); else startCall();
+
+// PTT биндинги — pointer events работают и для тача, и для мыши
+pttBtn.addEventListener('pointerdown', e => { e.preventDefault(); startRecording(); });
+pttBtn.addEventListener('pointerup',   e => { e.preventDefault(); if (recording) stopRecording(); });
+pttBtn.addEventListener('pointerleave',e => { if (recording) stopRecording(); });
+pttBtn.addEventListener('pointercancel', e => { if (recording) stopRecording(); });
+
+// Spacebar = PTT для десктопа (необязательно)
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && document.activeElement !== input && !recording) {
+    e.preventDefault();
+    startRecording();
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space' && recording) {
+    e.preventDefault();
+    stopRecording();
+  }
 });
 </script>
 </body>

@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>VoiceAssistant — тест</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+  #chat { border: 1px solid #ccc3; border-radius: 8px; padding: 12px; height: 50vh; overflow-y: auto; background: #0001; }
+  .msg { margin: 8px 0; padding: 8px 12px; border-radius: 12px; max-width: 80%; white-space: pre-wrap; word-wrap: break-word; }
+  .user { background: #2563eb; color: white; margin-left: auto; }
+  .bot  { background: #6b72801f; }
+  .err  { background: #dc2626; color: white; }
+  form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  input[type=text] { flex: 1; min-width: 200px; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; font: inherit; }
+  button { padding: 10px 14px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; font: inherit; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  #mic  { background: #16a34a; }
+  #mic.recording { background: #dc2626; animation: pulse 1s infinite; }
+  #call { background: #0891b2; }
+  #call.active { background: #dc2626; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 50% { opacity: 0.65; } }
+  .status { font-size: 13px; color: #888; margin-top: 10px; min-height: 18px; }
+  .level { display: inline-block; height: 6px; background: #16a34a; border-radius: 3px; margin-left: 8px; vertical-align: middle; transition: width 60ms linear; }
+</style>
+</head>
+<body>
+  <h1>🎙️ VoiceAssistant</h1>
+  <div class="sub">«📞 Позвонить» — стриминговый режим (минимальная задержка). «🎤 Говорить» — однократно.</div>
+
+  <div id="chat"></div>
+
+  <form id="form">
+    <button id="call" type="button">📞 Позвонить</button>
+    <button id="mic" type="button">🎤 Говорить</button>
+    <input id="input" type="text" placeholder="...или напиши" autocomplete="off">
+    <button id="send" type="submit">Отправить</button>
+  </form>
+  <div class="status"><span id="status"></span><span id="level" class="level" style="width:0px"></span></div>
+
+<script>
+const chat = document.getElementById('chat');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const micBtn = document.getElementById('mic');
+const callBtn = document.getElementById('call');
+const statusEl = document.getElementById('status');
+const levelEl = document.getElementById('level');
+const history = [];
+
+function addMsg(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+function setStatus(t) { statusEl.textContent = t || ''; }
+
+// ---------------------- Текстовый чат ----------------------
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  addMsg('user', text);
+  history.push({ role: 'user', content: text });
+  input.value = '';
+  sendBtn.disabled = true;
+  const thinking = addMsg('bot', '...');
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, history: history.slice(0, -1) }),
+    });
+    const txt = await res.text();
+    if (!res.ok) throw new Error(txt || ('HTTP ' + res.status));
+    const data = JSON.parse(txt);
+    thinking.textContent = data.reply;
+    history.push({ role: 'assistant', content: data.reply });
+  } catch (err) {
+    thinking.className = 'msg err';
+    thinking.textContent = 'Ошибка: ' + err.message;
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+
+// ---------------------- Аудио ----------------------
+const TARGET_SR = 16000;
+const VAD_THRESHOLD = 0.015;
+const VAD_SILENCE_MS = 700;
+const VAD_MIN_SPEECH_MS = 300;
+const BARGE_IN_FRAMES = 4;
+
+let audioCtx = null, micStream = null, recorderNode = null, sourceNode = null;
+let resampleRatio = 1;
+
+let mode = 'idle';   // 'idle' | 'push' | 'call'
+let pcmChunks = [];
+let speaking = false;
+let lastSpeechTs = 0;
+let speakStartTs = 0;
+let lastVoiceFrames = 0;
+
+let ws = null;
+let utteranceActive = false;     // в WS turn открыт (start послан, end ещё нет)
+
+// очередь воспроизведения для call-режима
+const audioQueue = [];
+let playingNow = null;
+let botPlaying = false;
+let botReplyMsg = null;          // div сообщения бота для накопления текста
+let userPlaceholderMsg = null;
+
+async function ensureMicAudio() {
+  if (audioCtx) return;
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  sourceNode = audioCtx.createMediaStreamSource(micStream);
+  recorderNode = audioCtx.createScriptProcessor(2048, 1, 1);
+  resampleRatio = audioCtx.sampleRate / TARGET_SR;
+  recorderNode.onaudioprocess = onFrame;
+  sourceNode.connect(recorderNode);
+  recorderNode.connect(audioCtx.destination);
+}
+async function tearDownMicAudio() {
+  try { recorderNode && recorderNode.disconnect(); } catch {}
+  try { sourceNode && sourceNode.disconnect(); } catch {}
+  try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch {}
+  try { audioCtx && await audioCtx.close(); } catch {}
+  audioCtx = micStream = recorderNode = sourceNode = null;
+}
+
+function onFrame(e) {
+  const inputBuf = e.inputBuffer.getChannelData(0);
+  let sum = 0;
+  for (let i = 0; i < inputBuf.length; i++) sum += inputBuf[i] * inputBuf[i];
+  const rms = Math.sqrt(sum / inputBuf.length);
+  levelEl.style.width = Math.min(120, rms * 600) + 'px';
+
+  const isVoice = rms > VAD_THRESHOLD;
+  const now = performance.now();
+
+  // Barge-in во время речи бота
+  if (botPlaying && mode === 'call') {
+    if (isVoice) lastVoiceFrames++; else lastVoiceFrames = 0;
+    if (lastVoiceFrames >= BARGE_IN_FRAMES) {
+      stopBotPlayback();
+    }
+    return;
+  }
+  if (mode === 'idle') return;
+
+  // ресэмплинг к 16k Int16
+  const ratio = resampleRatio;
+  const outLen = Math.floor(inputBuf.length / ratio);
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const s = Math.max(-1, Math.min(1, inputBuf[Math.floor(i * ratio)]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+
+  if (mode === 'push') { pcmChunks.push(out); return; }
+
+  // CALL: VAD + стриминг через WS
+  if (isVoice) {
+    if (!speaking) {
+      speaking = true;
+      speakStartTs = now;
+      pcmChunks = [];
+      setStatus('🟢 слушаю...');
+      wsStartTurn();
+      userPlaceholderMsg = addMsg('user', '🎤 ...');
+    }
+    lastSpeechTs = now;
+    wsSendPcm(out);
+  } else if (speaking) {
+    wsSendPcm(out);
+    if (now - lastSpeechTs > VAD_SILENCE_MS) {
+      const dur = lastSpeechTs - speakStartTs;
+      speaking = false;
+      if (dur >= VAD_MIN_SPEECH_MS) {
+        wsEndTurn();
+        setStatus('⏳ обработка...');
+      } else {
+        wsAbortTurn();
+        if (userPlaceholderMsg) userPlaceholderMsg.remove();
+        userPlaceholderMsg = null;
+      }
+    }
+  }
+}
+
+function flushPCM() {
+  let total = 0;
+  for (const c of pcmChunks) total += c.length;
+  const pcm = new Int16Array(total);
+  let off = 0;
+  for (const c of pcmChunks) { pcm.set(c, off); off += c.length; }
+  pcmChunks = [];
+  return pcm;
+}
+
+// ---------------------- WebSocket для режима звонка ----------------------
+function wsURL() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return proto + '//' + location.host + '/ws/voice';
+}
+function wsOpen() {
+  return new Promise((resolve, reject) => {
+    ws = new WebSocket(wsURL());
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => resolve();
+    ws.onerror = (e) => reject(new Error('ws error'));
+    ws.onclose = () => { ws = null; utteranceActive = false; };
+    ws.onmessage = onWsMessage;
+  });
+}
+
+function onWsMessage(ev) {
+  if (typeof ev.data === 'string') {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    switch (msg.type) {
+      case 'recognized':
+        if (userPlaceholderMsg) userPlaceholderMsg.textContent = '🎤 ' + msg.text;
+        history.push({ role: 'user', content: msg.text });
+        botReplyMsg = addMsg('bot', '');
+        break;
+      case 'reply_chunk':
+        if (botReplyMsg) botReplyMsg.textContent += (botReplyMsg.textContent ? ' ' : '') + msg.text;
+        break;
+      case 'done':
+        if (botReplyMsg) history.push({ role: 'assistant', content: botReplyMsg.textContent });
+        botReplyMsg = null;
+        utteranceActive = false;
+        setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
+        break;
+      case 'error':
+        addMsg('err', msg.message || 'ошибка');
+        utteranceActive = false;
+        setStatus(mode === 'call' ? '📞 в линии (говорите)' : '');
+        break;
+    }
+  } else {
+    // бинарь — OggOpus аудио предложения
+    const blob = new Blob([ev.data], { type: 'audio/ogg' });
+    enqueueAudio(blob);
+  }
+}
+
+function wsStartTurn() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  utteranceActive = true;
+  ws.send(JSON.stringify({ type: 'start', history }));
+}
+function wsSendPcm(int16) {
+  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(int16.buffer);
+}
+function wsEndTurn() {
+  if (!utteranceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'end' }));
+  utteranceActive = false;
+}
+function wsAbortTurn() {
+  // нет специального сообщения — просто закрываем и переподключаемся
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  utteranceActive = false;
+}
+
+// ---------------------- Очередь воспроизведения ----------------------
+function enqueueAudio(blob) {
+  audioQueue.push(blob);
+  if (!playingNow) playNext();
+}
+function playNext() {
+  if (audioQueue.length === 0) {
+    playingNow = null;
+    botPlaying = false;
+    return;
+  }
+  const blob = audioQueue.shift();
+  const url = URL.createObjectURL(blob);
+  playingNow = new Audio(url);
+  botPlaying = true;
+  setStatus('🔊 говорит ассистент');
+  playingNow.onended = () => { URL.revokeObjectURL(url); playNext(); };
+  playingNow.onerror = () => { URL.revokeObjectURL(url); playNext(); };
+  playingNow.play().catch(() => playNext());
+}
+function stopBotPlayback() {
+  audioQueue.length = 0;
+  if (playingNow) { try { playingNow.pause(); } catch {} playingNow = null; }
+  botPlaying = false;
+}
+
+// ---------------------- Push-to-talk (HTTP, без стриминга) ----------------------
+async function startPush() {
+  if (mode !== 'idle') return;
+  await ensureMicAudio();
+  pcmChunks = [];
+  mode = 'push';
+  micBtn.classList.add('recording');
+  micBtn.textContent = '⏹ отпусти';
+  setStatus('🎤 запись...');
+}
+async function stopPush() {
+  if (mode !== 'push') return;
+  mode = 'idle';
+  micBtn.classList.remove('recording');
+  micBtn.textContent = '🎤 Говорить';
+  const buf = flushPCM();
+  await tearDownMicAudio();
+  if (buf.length < TARGET_SR * 0.3) { setStatus('слишком коротко'); return; }
+  await sendVoiceHTTP(buf);
+}
+async function sendVoiceHTTP(pcm) {
+  setStatus('⏳ обработка...');
+  const placeholder = addMsg('user', '🎤 ...');
+  try {
+    const res = await fetch('/api/voice', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-History': encodeURIComponent(JSON.stringify(history)),
+      },
+      body: pcm.buffer,
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || ('HTTP ' + res.status));
+    }
+    const recognized = decodeURIComponent(res.headers.get('X-Recognized-Text') || '');
+    const reply = decodeURIComponent(res.headers.get('X-Reply-Text') || '');
+    const blob = await res.blob();
+    placeholder.textContent = '🎤 ' + recognized;
+    history.push({ role: 'user', content: recognized });
+    addMsg('bot', reply);
+    history.push({ role: 'assistant', content: reply });
+    enqueueAudio(blob);
+  } catch (e) {
+    placeholder.className = 'msg err';
+    placeholder.textContent = 'Голос: ' + e.message;
+    setStatus('');
+  }
+}
+micBtn.addEventListener('pointerdown', e => { e.preventDefault(); startPush(); });
+micBtn.addEventListener('pointerup',   e => { e.preventDefault(); stopPush(); });
+micBtn.addEventListener('pointerleave',e => { if (mode === 'push') stopPush(); });
+
+// ---------------------- Call mode (WS стриминг) ----------------------
+async function startCall() {
+  await ensureMicAudio();
+  await wsOpen();
+  mode = 'call';
+  pcmChunks = [];
+  speaking = false;
+  callBtn.classList.add('active');
+  callBtn.textContent = '📵 Положить трубку';
+  micBtn.disabled = true;
+  setStatus('📞 в линии (говорите)');
+}
+async function stopCall() {
+  mode = 'idle';
+  stopBotPlayback();
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  utteranceActive = false;
+  await tearDownMicAudio();
+  callBtn.classList.remove('active');
+  callBtn.textContent = '📞 Позвонить';
+  micBtn.disabled = false;
+  setStatus('');
+  levelEl.style.width = '0px';
+}
+callBtn.addEventListener('click', () => {
+  if (mode === 'call') stopCall(); else startCall();
+});
+</script>
+</body>
+</html>

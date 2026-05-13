@@ -1,0 +1,9 @@
+services:
+  voice-assistant:
+    build: .
+    container_name: voice-assistant
+    ports:
+      - "8081:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
